@@ -126,13 +126,16 @@ func RunFromConfig(rCfg *rest.Config, cfg *config.Config) (errCount int) {
 	trackErrorsFor("querying cluster resources")(
 		QueryResources(apiHelper, recorder, nil, cfg),
 	)
-	_ = nslist
+
+	trackErrorsFor("querying pod logs under namespace " + cfg.Namespace)(
+		QueryPodLogs(kubeClient, recorder, cfg.Namespace, cfg),
+	)
+
+	trackErrorsFor("querying server info")(
+		QueryServerData(kubeClient, recorder, cfg),
+	)
 
 	for _, ns := range nslist {
-		trackErrorsFor("querying cluster resources")(
-			QueryPodLogs(kubeClient, recorder, ns, cfg),
-		)
-
 		trackErrorsFor("querying resources under namespace " + ns)(
 			QueryResources(apiHelper, recorder, &ns, cfg),
 		)

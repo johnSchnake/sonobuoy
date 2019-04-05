@@ -230,6 +230,21 @@ func QueryHostData(kubeClient kubernetes.Interface, recorder *QueryRecorder, cfg
 
 	return nil
 }
+func QueryServerData(kubeClient kubernetes.Interface, recorder *QueryRecorder, cfg *config.Config) error {
+	objqry := func() (interface{}, error) { return kubeClient.Discovery().ServerVersion() }
+	query := func() (time.Duration, error) {
+		return timedObjectQuery(cfg.OutputDir(), "serverversion.json", objqry)
+	}
+	timedQuery(recorder, "serverversion", "", query)
+
+	objqry = func() (interface{}, error) { return kubeClient.Discovery().ServerGroups() }
+	query = func() (time.Duration, error) {
+		return timedObjectQuery(cfg.OutputDir(), "servergroups.json", objqry)
+	}
+	timedQuery(recorder, "servergroups", "", query)
+
+	return nil
+}
 
 /*
 // QueryClusterResources queries non-namespace resources in the cluster, writing
