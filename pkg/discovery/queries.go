@@ -22,27 +22,18 @@ import (
 	"path"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/heptio/sonobuoy/pkg/dynamic"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/heptio/sonobuoy/pkg/config"
-	"github.com/heptio/sonobuoy/pkg/errlog"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
-
-// ObjQuery is a query function that returns a kubernetes object
-type ObjQuery func() (runtime.Object, error)
-
-// UntypedQuery is a query function that return an untyped array of objs
-type UntypedQuery func() (interface{}, error)
-
-// UntypedListQuery is a query function that return an untyped array of objs
-type UntypedListQuery func() ([]interface{}, error)
 
 const (
 	// NSResourceLocation is the place under which namespaced API resources (pods, etc) are stored
@@ -55,54 +46,33 @@ const (
 	MetaLocation = "meta"
 )
 
-// objListQuery performs a list query and serialize the results
-func objListQuery(outpath string, file string, f ObjQuery) (time.Duration, error) {
+type listQuery func() (*unstructured.UnstructuredList, error)
+type objQuery func() (interface{}, error)
+
+// timedListQuery performs a list query and serialize the results
+func timedListQuery(outpath string, file string, f listQuery) (time.Duration, error) {
 	start := time.Now()
-	listObj, err := f()
+	list, err := f()
 	duration := time.Since(start)
 	if err != nil {
 		return duration, err
 	}
-	if listObj == nil {
-		return duration, errors.Errorf("got invalid response from API server")
-	}
 
-	listPtr, err := meta.GetItemsPtr(listObj)
-	if err != nil {
-		return duration, errors.WithStack(err)
-	}
-
-	items, err := conversion.EnforcePtr(listPtr)
-	if err != nil {
-		return duration, errors.WithStack(err)
-	}
-
-	if items.Len() > 0 {
-		err = errors.WithStack(SerializeObj(listPtr, outpath, file))
+	if len(list.Items) > 0 {
+		err = errors.WithStack(SerializeObj(list.Items, outpath, file))
 	}
 	return duration, err
 }
 
-// untypedQuery performs a untyped query and serialize the results
-func untypedQuery(outpath string, file string, f UntypedQuery) (time.Duration, error) {
+func timedObjectQuery(outpath string, file string, f objQuery) (time.Duration, error) {
 	start := time.Now()
-	Obj, err := f()
+	obj, err := f()
 	duration := time.Since(start)
-	if err == nil && Obj != nil {
-		err = SerializeObj(Obj, outpath, file)
+	if err != nil {
+		return duration, err
 	}
-	return duration, err
-}
 
-// untypedListQuery performs a untyped list query and serialize the results
-func untypedListQuery(outpath string, file string, f UntypedListQuery) (time.Duration, error) {
-	start := time.Now()
-	listObj, err := f()
-	duration := time.Since(start)
-	if err == nil && listObj != nil {
-		err = SerializeArrayObj(listObj, outpath, file)
-	}
-	return duration, err
+	return duration, errors.WithStack(SerializeObj(obj, outpath, file))
 }
 
 // timedQuery Wraps the execution of the function with a recorded timed snapshot
@@ -111,101 +81,79 @@ func timedQuery(recorder *QueryRecorder, name string, ns string, fn func() (time
 	recorder.RecordQuery(name, ns, duration, fnErr)
 }
 
-// queryNsResource performs the appropriate namespace-scoped query according to its input args
-func queryNsResource(ns string, resourceKind string, opts metav1.ListOptions, kubeClient kubernetes.Interface) (runtime.Object, error) {
-	switch resourceKind {
-	case "ConfigMaps":
-		return kubeClient.CoreV1().ConfigMaps(ns).List(opts)
-	case "ControllerRevisions":
-		return kubeClient.AppsV1().ControllerRevisions(ns).List(opts)
-	case "CronJobs":
-		return kubeClient.BatchV1beta1().CronJobs(ns).List(opts)
-	case "DaemonSets":
-		return kubeClient.AppsV1().DaemonSets(ns).List(opts)
-	case "Deployments":
-		return kubeClient.AppsV1().Deployments(ns).List(opts)
-	case "Endpoints":
-		return kubeClient.CoreV1().Endpoints(ns).List(opts)
-	case "Events":
-		return kubeClient.CoreV1().Events(ns).List(opts)
-	case "HorizontalPodAutoscalers":
-		return kubeClient.AutoscalingV1().HorizontalPodAutoscalers(ns).List(opts)
-	case "Ingresses":
-		return kubeClient.ExtensionsV1beta1().Ingresses(ns).List(opts)
-	case "Jobs":
-		return kubeClient.BatchV1().Jobs(ns).List(opts)
-	case "LimitRanges":
-		return kubeClient.CoreV1().LimitRanges(ns).List(opts)
-	case "NetworkPolicies":
-		return kubeClient.NetworkingV1().NetworkPolicies(ns).List(opts)
-	case "PersistentVolumeClaims":
-		return kubeClient.CoreV1().PersistentVolumeClaims(ns).List(opts)
-	case "Pods":
-		return kubeClient.CoreV1().Pods(ns).List(opts)
-	case "PodDisruptionBudgets":
-		return kubeClient.PolicyV1beta1().PodDisruptionBudgets(ns).List(opts)
-	case "PodTemplates":
-		return kubeClient.CoreV1().PodTemplates(ns).List(opts)
-	case "ReplicaSets":
-		return kubeClient.AppsV1().ReplicaSets(ns).List(opts)
-	case "ReplicationControllers":
-		return kubeClient.CoreV1().ReplicationControllers(ns).List(opts)
-	case "ResourceQuotas":
-		return kubeClient.CoreV1().ResourceQuotas(ns).List(opts)
-	case "RoleBindings":
-		return kubeClient.RbacV1().RoleBindings(ns).List(opts)
-	case "Roles":
-		return kubeClient.RbacV1().Roles(ns).List(opts)
-	case "ServiceAccounts":
-		return kubeClient.CoreV1().ServiceAccounts(ns).List(opts)
-	case "Services":
-		return kubeClient.CoreV1().Services(ns).List(opts)
-	case "StatefulSets":
-		return kubeClient.AppsV1().StatefulSets(ns).List(opts)
-	default:
-		return nil, errors.Errorf("Unsupported resource %v", resourceKind)
+func sliceContains(set []string, val string) bool {
+	for _, v := range set {
+		if v == val {
+			return true
+		}
 	}
+	return false
 }
 
-// queryNonNsResource performs the appropriate non-namespace-scoped query according to its input args
-func queryNonNsResource(resourceKind string, kubeClient kubernetes.Interface) (runtime.Object, error) {
-	switch resourceKind {
-	case "CertificateSigningRequests":
-		return kubeClient.CertificatesV1beta1().CertificateSigningRequests().List(metav1.ListOptions{})
-	case "ClusterRoleBindings":
-		return kubeClient.RbacV1().ClusterRoleBindings().List(metav1.ListOptions{})
-	case "ClusterRoles":
-		return kubeClient.RbacV1().ClusterRoles().List(metav1.ListOptions{})
-	case "ComponentStatuses":
-		return kubeClient.CoreV1().ComponentStatuses().List(metav1.ListOptions{})
-	case "CustomResourceDefinitions":
-		// TODO : This should get cleaned up in future revisions.
-		apiextensionsclientset := apiextensionsclient.New(kubeClient.CoreV1().RESTClient())
-		if apiextensionsclientset != nil {
-			return apiextensionsclientset.ApiextensionsV1beta1().CustomResourceDefinitions().List(metav1.ListOptions{})
-		}
-		return nil, errors.Errorf("Failed to create extensions client for CRDs")
-	case "Nodes":
-		return kubeClient.CoreV1().Nodes().List(metav1.ListOptions{})
-	case "PersistentVolumes":
-		return kubeClient.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
-	case "PodSecurityPolicies":
-		return kubeClient.ExtensionsV1beta1().PodSecurityPolicies().List(metav1.ListOptions{})
-	case "StorageClasses":
-		return kubeClient.StorageV1().StorageClasses().List(metav1.ListOptions{})
-	default:
-		return nil, errors.Errorf("don't know how to handle non-namespaced resource %v", resourceKind)
+// given the filter options and a query against the given ns; what resources should we query? resourceNameList being empty means all. Only kept that for backwards compat.
+func getResources(client *dynamic.APIHelper, ns *string, filterOpts config.FilterOptions, resourceNameList []string) ([]schema.GroupVersionResource, error) {
+	// if not in a chosen ns; just return nil
+
+	resourceMap, err := client.DiscoveryClient.ServerPreferredResources()
+	if err != nil {
+		return nil, err
 	}
+
+	listOpt := metav1.ListOptions{}
+	if ns != nil && len(*ns) > 0 {
+		listOpt.FieldSelector = "metadata.namespace=" + *ns
+	}
+	listOpt.LabelSelector = filterOpts.LabelSelector
+
+	allResources := []schema.GroupVersionResource{}
+	for _, apiResourceList := range resourceMap {
+		version, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
+		if err != nil {
+			return nil, errors.Wrap(err, "parsing schema")
+		}
+		for _, apiResource := range apiResourceList.APIResources {
+			if len(resourceNameList) > 0 && !sliceContains(resourceNameList, apiResource.Name) {
+				continue
+			}
+
+			// Only look at either NS objects or cluster objects
+			if (ns != nil && !apiResource.Namespaced) ||
+				ns == nil && apiResource.Namespaced {
+				continue
+			}
+
+			// Double check the resources are listable.
+			listable := false
+			for _, v := range apiResource.Verbs {
+				if v == "list" {
+					listable = true
+					break
+				}
+			}
+			if listable {
+				allResources = append(allResources, version.WithResource(apiResource.Name))
+			}
+		}
+	}
+	return allResources, nil
 }
 
 // QueryNSResources will query namespace-specific resources in the cluster,
 // writing them out to <resultsdir>/resources/ns/<ns>/*.json
 // TODO: Eliminate dependencies from config.Config and pass in data
-func QueryNSResources(kubeClient kubernetes.Interface, recorder *QueryRecorder, ns string, cfg *config.Config) error {
-	logrus.Infof("Running ns query (%v)", ns)
+func QueryResources(client *dynamic.APIHelper, recorder *QueryRecorder, ns *string, cfg *config.Config) error {
+	if ns != nil {
+		logrus.Infof("Running ns query (%v)", *ns)
+	} else {
+		logrus.Info("Running cluster queries")
+	}
 
 	// 1. Create the parent directory we will use to store the results
-	outdir := path.Join(cfg.OutputDir(), NSResourceLocation, ns)
+	outdir := path.Join(cfg.OutputDir(), ClusterResourceLocation)
+	if ns != nil {
+		outdir = path.Join(cfg.OutputDir(), NSResourceLocation, *ns)
+	}
+
 	if err := os.MkdirAll(outdir, 0755); err != nil {
 		return errors.WithStack(err)
 	}
@@ -219,40 +167,75 @@ func QueryNSResources(kubeClient kubernetes.Interface, recorder *QueryRecorder, 
 			opts.LabelSelector = cfg.Filters.LabelSelector
 		}
 	}
+	if ns != nil && len(*ns) > 0 {
+		opts.FieldSelector = "metadata.namespace=" + *ns
+	}
 
-	var resources []string
-	if cfg.Namespace == ns {
-		resources = config.NamespacedResources
-	} else {
-		resources = cfg.FilterResources(config.NamespacedResources)
+	resources, err := getResources(client, ns, cfg.Filters, nil)
+	if err != nil {
+		return errors.Wrap(err, "choosing resources to gather")
 	}
 
 	// 3. Execute the ns-query
-	for _, resourceKind := range resources {
-		switch resourceKind {
-		case "PodLogs":
-			start := time.Now()
-			err := gatherPodLogs(kubeClient, ns, opts, cfg)
-			if err != nil {
-				errlog.LogError(err)
-				continue
-			}
-			duration := time.Since(start)
-			recorder.RecordQuery("PodLogs", ns, duration, err)
-		default:
-			lister := func() (runtime.Object, error) { return queryNsResource(ns, resourceKind, opts, kubeClient) }
-			query := func() (time.Duration, error) { return objListQuery(outdir+"/", resourceKind+".json", lister) }
-			timedQuery(recorder, resourceKind, ns, query)
+	for _, gvk := range resources {
+		lister := func() (*unstructured.UnstructuredList, error) {
+			resourceClient := client.Client.Resource(gvk)
+			resources, err := resourceClient.List(opts)
+
+			return resources, errors.Wrapf(err, "listing resource %v", gvk)
 		}
+		query := func() (time.Duration, error) { return timedListQuery(outdir+"/", gvk.Resource+".json", lister) }
+		timedQuery(recorder, gvk.Resource, fmt.Sprint(ns), query)
 	}
 
 	return nil
 }
 
+func QueryPodLogs(kubeClient kubernetes.Interface, recorder *QueryRecorder, ns string, cfg *config.Config) error {
+	start := time.Now()
+
+	opts := metav1.ListOptions{}
+	if len(cfg.Filters.LabelSelector) > 0 {
+		if _, err := labels.Parse(cfg.Filters.LabelSelector); err != nil {
+			logrus.Warningf("Labelselector %v failed to parse with error %v", cfg.Filters.LabelSelector, err)
+		} else {
+			opts.LabelSelector = cfg.Filters.LabelSelector
+		}
+	}
+
+	err := gatherPodLogs(kubeClient, ns, opts, cfg)
+	if err != nil {
+		return err
+	}
+	duration := time.Since(start)
+	recorder.RecordQuery("PodLogs", ns, duration, err)
+	return nil
+}
+
+func QueryHostData(kubeClient kubernetes.Interface, recorder *QueryRecorder, cfg *config.Config) error {
+	start := time.Now()
+
+	// TODO(chuckha) look at FieldSelector for list options{}
+	nodeList, err := kubeClient.CoreV1().Nodes().List(metav1.ListOptions{})
+	if err != nil {
+		return errors.Wrap(err, "failed to get node list")
+	}
+	nodeNames := make([]string, len(nodeList.Items))
+	for i, node := range nodeList.Items {
+		nodeNames[i] = node.Name
+	}
+	err = gatherNodeData(nodeNames, kubeClient.CoreV1().RESTClient(), cfg)
+	duration := time.Since(start)
+	recorder.RecordQuery("Nodes", "", duration, err)
+
+	return nil
+}
+
+/*
 // QueryClusterResources queries non-namespace resources in the cluster, writing
 // them out to <resultsdir>/resources/non-ns/*.json
 // TODO: Eliminate dependencies from config.Config and pass in data
-func QueryClusterResources(kubeClient kubernetes.Interface, recorder *QueryRecorder, cfg *config.Config) error {
+func QueryClusteresources(kubeClient kubernetes.Interface, recorder *QueryRecorder, cfg *config.Config) error {
 	logrus.Infof("Running non-ns query")
 
 	resources := cfg.FilterResources(config.ClusterResources)
@@ -317,3 +300,4 @@ func QueryClusterResources(kubeClient kubernetes.Interface, recorder *QueryRecor
 
 	return nil
 }
+*/

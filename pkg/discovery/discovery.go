@@ -25,19 +25,36 @@ import (
 	"time"
 
 	"github.com/heptio/sonobuoy/pkg/config"
+	"github.com/heptio/sonobuoy/pkg/dynamic"
 	"github.com/heptio/sonobuoy/pkg/errlog"
+
 	"github.com/pkg/errors"
 	"github.com/rifflock/lfshook"
 	"github.com/sirupsen/logrus"
 	"github.com/viniciuschiele/tarx"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	pluginaggregation "github.com/heptio/sonobuoy/pkg/plugin/aggregation"
 )
 
-// Run is the main entrypoint for discovery
-func Run(kubeClient kubernetes.Interface, cfg *config.Config) (errCount int) {
+// RunFromConfig is the main entrypoint for discovery
+func RunFromConfig(rCfg *rest.Config, cfg *config.Config) (errCount int) {
+	apiHelper, err := dynamic.NewAPIHelperFromRESTConfig(rCfg)
+	if err != nil {
+		errlog.LogError(err)
+		return 1
+	}
+	kubeClient, err := kubernetes.NewForConfig(rCfg)
+	if err != nil {
+		errlog.LogError(err)
+		os.Exit(1)
+	}
+
+	results, err := apiHelper.ListNSResources("heptio-sonobuoy", nil)
+	fmt.Println("SCHNAKE these are raw results:", results, err)
+	//---------start of copied code
 	t := time.Now()
 
 	// 1. Create the directory which will store the results, including the
@@ -45,7 +62,7 @@ func Run(kubeClient kubernetes.Interface, cfg *config.Config) (errCount int) {
 	// config)
 	outpath := path.Join(cfg.ResultsDir, cfg.UUID)
 	metapath := path.Join(outpath, MetaLocation)
-	err := os.MkdirAll(metapath, 0755)
+	err = os.MkdirAll(metapath, 0755)
 	if err != nil {
 		errlog.LogError(errors.Wrap(err, "could not create directory to store results"))
 		return errCount + 1
@@ -100,14 +117,24 @@ func Run(kubeClient kubernetes.Interface, cfg *config.Config) (errCount int) {
 	)
 
 	// 5. Run the queries
+
 	recorder := NewQueryRecorder()
 	trackErrorsFor("querying cluster resources")(
-		QueryClusterResources(kubeClient, recorder, cfg),
+		QueryHostData(kubeClient, recorder, cfg),
 	)
 
+	trackErrorsFor("querying cluster resources")(
+		QueryResources(apiHelper, recorder, nil, cfg),
+	)
+	_ = nslist
+
 	for _, ns := range nslist {
+		trackErrorsFor("querying cluster resources")(
+			QueryPodLogs(kubeClient, recorder, ns, cfg),
+		)
+
 		trackErrorsFor("querying resources under namespace " + ns)(
-			QueryNSResources(kubeClient, recorder, ns, cfg),
+			QueryResources(apiHelper, recorder, &ns, cfg),
 		)
 	}
 
@@ -135,6 +162,113 @@ func Run(kubeClient kubernetes.Interface, cfg *config.Config) (errCount int) {
 	logrus.Infof("Results available at %v", tb)
 
 	return errCount
+
+	return 0
+}
+
+// *Deprecated* use RunFromConfig instead
+// Run used to be the main entrypoint for discovery before using the dynamic
+// client for queries.
+func Run(kubeClient kubernetes.Interface, cfg *config.Config) (errCount int) {
+	return 0 /*
+		t := time.Now()
+
+		// 1. Create the directory which will store the results, including the
+		// `meta` directory inside it (which we always need regardless of
+		// config)
+		outpath := path.Join(cfg.ResultsDir, cfg.UUID)
+		metapath := path.Join(outpath, MetaLocation)
+		err := os.MkdirAll(metapath, 0755)
+		if err != nil {
+			errlog.LogError(errors.Wrap(err, "could not create directory to store results"))
+			return errCount + 1
+		}
+
+		// Write logs to the configured results location. All log levels
+		// should write to the same log file
+		pathmap := make(lfshook.PathMap)
+		logfile := path.Join(metapath, "run.log")
+		for _, level := range logrus.AllLevels {
+			pathmap[level] = logfile
+		}
+
+		hook := lfshook.NewHook(pathmap, &logrus.JSONFormatter{})
+
+		logrus.AddHook(hook)
+
+		// Unset all hooks as we exit the Run function
+		defer func() {
+			logrus.StandardLogger().Hooks = make(logrus.LevelHooks)
+		}()
+		// closure used to collect and report errors.
+		trackErrorsFor := func(action string) func(error) {
+			return func(err error) {
+				if err != nil {
+					errCount++
+					errlog.LogError(errors.Wrapf(err, "error %v", action))
+				}
+			}
+		}
+
+		// 2. Get the list of namespaces and apply the regex filter on the namespace
+		nsfilter := fmt.Sprintf("%s|%s", cfg.Filters.Namespaces, cfg.Namespace)
+		logrus.Infof("Filtering namespaces based on the following regex:%s", nsfilter)
+		nslist, err := FilterNamespaces(kubeClient, nsfilter)
+		if err != nil {
+			errlog.LogError(errors.Wrap(err, "could not filter namespaces"))
+			return errCount + 1
+		}
+
+		// 3. Dump the config.json we used to run our test
+		if blob, err := json.Marshal(cfg); err == nil {
+			if err = ioutil.WriteFile(path.Join(metapath, "config.json"), blob, 0644); err != nil {
+				errlog.LogError(errors.Wrap(err, "could not write config.json file"))
+				return errCount + 1
+			}
+		}
+
+		// 4. Run the plugin aggregator
+		trackErrorsFor("running plugins")(
+			pluginaggregation.Run(kubeClient, cfg.LoadedPlugins, cfg.Aggregation, cfg.Namespace, outpath),
+		)
+
+		// 5. Run the queries
+		recorder := NewQueryRecorder()
+		trackErrorsFor("querying cluster resources")(
+			QueryClusterResources(kubeClient, recorder, cfg),
+		)
+
+		for _, ns := range nslist {
+			trackErrorsFor("querying resources under namespace " + ns)(
+				QueryNSResources(kubeClient, recorder, ns, cfg),
+			)
+		}
+
+		// 6. Dump the query times
+		trackErrorsFor("recording query times")(
+			recorder.DumpQueryData(path.Join(metapath, "query-time.json")),
+		)
+
+		// 7. Clean up after the plugins
+		pluginaggregation.Cleanup(kubeClient, cfg.LoadedPlugins)
+
+		// 8. tarball up results YYYYMMDDHHMM_sonobuoy_UID.tar.gz
+		tb := cfg.ResultsDir + "/" + t.Format("200601021504") + "_sonobuoy_" + cfg.UUID + ".tar.gz"
+		err = tarx.Compress(tb, outpath, &tarx.CompressOptions{Compression: tarx.Gzip})
+		if err == nil {
+			defer os.RemoveAll(outpath)
+		}
+		trackErrorsFor("assembling results tarball")(err)
+
+		// 9. Mark final annotation stating the results are available and status is completed.
+		trackErrorsFor("updating pod status")(
+			updateStatus(kubeClient, cfg.Namespace, pluginaggregation.CompleteStatus),
+		)
+
+		logrus.Infof("Results available at %v", tb)
+
+		return errCount
+	*/
 }
 
 // updateStatus changes the summary status of the sonobuoy pod in order to

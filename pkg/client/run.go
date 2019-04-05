@@ -39,9 +39,6 @@ var (
 	pollInterval = 20 * time.Second
 )
 
-func (c *SonobuoyClient) ListAll() error {
-
-}
 func (c *SonobuoyClient) Run(cfg *RunConfig) error {
 	manifest, err := c.GenerateManifest(&cfg.GenConfig)
 	if err != nil {

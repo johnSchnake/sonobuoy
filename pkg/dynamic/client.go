@@ -1,6 +1,9 @@
 package dynamic
 
 import (
+	"encoding/json"
+	"os"
+
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -11,6 +14,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+
+	"fmt"
 )
 
 // A scoped down meta.MetadataAccessor
@@ -27,7 +32,9 @@ type mapper interface {
 
 // APIHelper wraps the client-go dynamic client and exposes a simple interface.
 type APIHelper struct {
-	Client   dynamic.Interface
+	Client          dynamic.Interface
+	DiscoveryClient discovery.DiscoveryInterface
+
 	Mapper   mapper
 	Accessor MetadataAccessor
 }
@@ -48,7 +55,12 @@ func NewAPIHelperFromRESTConfig(cfg *rest.Config) (*APIHelper, error) {
 		return nil, errors.Wrap(err, "could not get api group resources")
 	}
 	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
-	return NewAPIHelper(dynClient, mapper, meta.NewAccessor())
+	return &APIHelper{
+		Client:          dynClient,
+		Mapper:          mapper,
+		Accessor:        meta.NewAccessor(),
+		DiscoveryClient: discover,
+	}, nil
 }
 
 // NewAPIHelper returns an APIHelper with the internals instantiated.
@@ -81,6 +93,171 @@ func (a *APIHelper) CreateObject(obj *unstructured.Unstructured) (*unstructured.
 	}
 	ri := rsc.Namespace(namespace)
 	return ri.Create(obj, metav1.CreateOptions{})
+}
+
+// if filterResources is empty it queries them all
+func (a *APIHelper) ListNSResources(ns string, filterResources []string) (map[string][]unstructured.Unstructured, error) {
+	resourceMap, err := a.DiscoveryClient.ServerPreferredResources()
+	if err != nil {
+		return nil, err
+	}
+
+	listOpt := metav1.ListOptions{}
+	if len(ns) > 0 {
+		listOpt.FieldSelector = "metadata.namespace=" + ns
+	}
+
+	allResources := []schema.GroupVersionResource{}
+	for _, apiResourceList := range resourceMap {
+		version, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
+		if err != nil {
+			//fmt.Println("schnake parsing scheme err", err)
+		}
+		for _, apiResource := range apiResourceList.APIResources {
+			//fmt.Printf("apiresource info: %#v\n\n", apiResource)
+			if len(filterResources) > 0 && !sliceContains(filterResources, apiResource.Name) {
+				continue
+			}
+
+			if !apiResource.Namespaced {
+				continue
+			}
+
+			listable := false
+			for _, v := range apiResource.Verbs {
+				if v == "list" {
+					listable = true
+					break
+				}
+			}
+			if listable {
+				allResources = append(allResources, version.WithResource(apiResource.Name))
+			}
+		}
+	}
+
+	//fmt.Println("all resources:", allResources)
+
+	results := map[string][]unstructured.Unstructured{}
+	for _, gvr := range allResources {
+		fmt.Println("gvr:", gvr)
+		resourceClient := a.Client.Resource(gvr)
+
+		resources, err := resourceClient.List(listOpt)
+		if err != nil {
+			return nil, errors.Wrapf(err, "listing resource %v", gvr)
+		}
+		/*
+			// schnake nice for debug but should just be marshal for size
+			b, err := json.MarshalIndent(stuff.Items, "", "  ")
+			if err != nil {
+				return nil, errors.Wrapf(err, "marshalling resource %v", gvr)
+			}
+			fmt.Printf("--- ITEMs NS: %v Details: %v\n", string(b))
+			fmt.Println()
+		*/
+
+		results[gvr.String()] = resources.Items
+	}
+	return results, nil
+}
+
+func sliceContains(set []string, val string) bool {
+	for _, v := range set {
+		if v == val {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *APIHelper) ListAll() {
+
+	//indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	//target := dynamiclister.New(indexer, test.gvrToSync).Namespace(test.namespaceToSync)
+
+	resourceMap, err := a.DiscoveryClient.ServerPreferredResources()
+	_ = err
+	allResources := map[schema.GroupVersionResource]bool{}
+	for _, apiResourceList := range resourceMap {
+		version, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
+		if err != nil {
+			fmt.Println("schnake parsing scheme err", err)
+		}
+		for _, apiResource := range apiResourceList.APIResources {
+			fmt.Printf("apiresource info: %#v\n\n", apiResource)
+
+			listable, gettable := false, false
+			for _, v := range apiResource.Verbs {
+				if v == "list" {
+					listable = true
+					break
+				}
+				if v == "get" {
+					gettable = true
+				}
+			}
+			switch {
+			case listable:
+				allResources[version.WithResource(apiResource.Name)] = true
+			case gettable:
+				fmt.Println("not listable BUT gettable:", version.WithResource(apiResource.Name))
+				fmt.Printf("apiresource info: %#v\n\n", apiResource)
+				allResources[version.WithResource(apiResource.Name)] = false
+			default:
+				fmt.Println("not listable or gettable:", version.WithResource(apiResource.Name))
+				fmt.Printf("apiresource info: %#v\n\n", apiResource)
+
+				continue
+			}
+		}
+	}
+
+	fmt.Println("all resources:", allResources)
+
+	for gvr, listable := range allResources {
+		fmt.Println("gvr:", gvr)
+		resourceClient := a.Client.Resource(gvr)
+
+		if listable {
+			stuff, err := resourceClient.List(metav1.ListOptions{
+				//FieldSelector: "metadata.namespace=",
+			})
+			if err != nil {
+				fmt.Println("SCHNAKE ERR stuff:", err)
+				os.Exit(1)
+			}
+			b, err := json.MarshalIndent(stuff.Items, "", "  ")
+			if err != nil {
+				fmt.Println("schnake marshal err", err)
+				continue
+			}
+			fmt.Printf("--- ITEMs NS: %v Details: %v\n", string(b))
+			fmt.Println()
+		} else {
+			v, err := resourceClient.Get("", metav1.GetOptions{})
+			if err != nil {
+				fmt.Println("SCHNAKE ERR get thing", gvr, gvr.String(), err)
+				os.Exit(1)
+			}
+			b, err := v.MarshalJSON()
+			fmt.Println("schnake marshal err", err)
+			fmt.Printf("--- --- GETTABLE ONLY ITEM NS: %v Details: %v\n", v.GetNamespace(), string(b))
+			fmt.Println()
+		}
+	}
+	os.Exit(1)
+
+	// not getting things like pod logs or healthz etc since they are not listable
+
+	//dump it into a structure (write the json out)
+	// namespaced or not
+	// namespace (if one)
+	// gvk
+	// item
+
+	fmt.Println("allresources?", allResources)
+	os.Exit(1)
 }
 
 // Name returns the name of the kubernetes object.

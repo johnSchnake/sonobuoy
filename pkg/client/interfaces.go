@@ -94,6 +94,9 @@ type SonobuoyKubeAPIClient interface {
 	Name(*unstructured.Unstructured) (string, error)
 	Namespace(*unstructured.Unstructured) (string, error)
 	ResourceVersion(*unstructured.Unstructured) (string, error)
+
+	ListNSResources(ns string, filterResources []string) (map[string][]unstructured.Unstructured, error)
+	//ListClusterResources(filterResources []string) ([]unstructured.Unstructured, error)
 }
 
 // SonobuoyClient is a high-level interface to Sonobuoy operations.

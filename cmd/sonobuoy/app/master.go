@@ -22,11 +22,8 @@ import (
 	"github.com/heptio/sonobuoy/pkg/config"
 	"github.com/heptio/sonobuoy/pkg/discovery"
 	"github.com/heptio/sonobuoy/pkg/errlog"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-
-	"k8s.io/client-go/kubernetes"
 )
 
 var noExit bool
@@ -51,11 +48,12 @@ func NewCmdMaster() *cobra.Command {
 
 func runMaster(cmd *cobra.Command, args []string) {
 
-	cfg, err := config.LoadConfig()
+	/*cfg, err := config.LoadConfig()
 	if err != nil {
 		errlog.LogError(errors.Wrap(err, "error loading sonobuoy configuration"))
 		os.Exit(1)
-	}
+	}*/
+	cfg := config.New()
 
 	kcfg, err := kubecfg.Get()
 	if err != nil {
@@ -63,14 +61,8 @@ func runMaster(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	clientset, err := kubernetes.NewForConfig(kcfg)
-	if err != nil {
-		errlog.LogError(err)
-		os.Exit(1)
-	}
-
 	// Run Discovery (gather API data, run plugins)
-	errcount := discovery.Run(clientset, cfg)
+	errcount := discovery.RunFromConfig(kcfg, cfg)
 
 	if noExit {
 		logrus.Info("no-exit was specified, sonobuoy is now blocking")
